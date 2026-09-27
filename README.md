@@ -1,26 +1,33 @@
-# Crane Physics Rig
+# 除夜の鐘クレーン
 
-The project now contains only a reusable Unity Physics 2D rig script. It does
-not create GameObjects and contains no camera, rendering, input, UI, scoring,
-timer, audio, particles, or gameplay flow.
+## ゲームを作る時に考えたこと
 
-## Scene objects to create
+私は、クレーンの先にある槌を振り子のように動かして、鐘を叩くゲームを作りたいと思いました。参考にしたゲームのように、プレイヤーが直接槌を動かすのではなく、最初に決めた角度や位置から、重力で動き始めるようにしています。
 
-Create these objects yourself and assign them to `CranePhysicsRig`:
+振り子の動きを全部自分で計算するのは難しいので、Unity の `Rigidbody2D` と `HingeJoint2D` を使いました。クレーンのブームの先に 1 本目の棒をつなぎ、さらにその先に 2 本目の棒と槌をつなぐ形です。2 つの支点が動くので、槌は二重振り子のように動きます。
 
-1. Root anchor: `Rigidbody2D`
-2. First link: `Rigidbody2D`, `BoxCollider2D`, and `HingeJoint2D`
-3. Second link: `Rigidbody2D`, `BoxCollider2D`, and `HingeJoint2D`
-4. Optional first-joint and end-mass child colliders
-5. Optional boom-pivot transform and `PhysicsMaterial2D` assets
+ゲームを始める前は、棒が動かない状態にして、支点の角度や棒の長さ、槌の位置を調整します。START を押すと棒を `Dynamic` にして、Unity の物理計算を始めます。END を押すと動きを止めて、最初の位置に戻します。
 
-Attach `CranePhysicsRig` to any manager object. Both links use local +X from
-their hinge toward their free end. A mass collider may be placed on the same
-link object or on a child without its own `Rigidbody2D`.
+## 物理計算について
 
-`startSimulatingOnAwake` releases the links automatically. A future UI can call
-`SetConfiguration`, `SetBoomAngle`, `SetLinkLengths`, `SetEndMassDensity`,
-`StartSimulation`, and `ResetSimulation`.
+棒や槌の重さは Collider の密度から Unity に計算させています。槌を重くすると、2 本目の棒と槌を合わせた物体の質量が大きくなります。そのため、振り子の動きも鐘に当たった時の計算も変わります。
 
-Link lengths only have a small non-zero minimum and no upper limit. Once
-simulation starts, Unity Physics 2D controls all motion and collision response.
+棒と真ん中の重りは質量の計算には使いますが、ほかの物にぶつからないようにしています。先端の槌だけが物に当たります。こうしたのは、棒が鐘などに当たって槌の動きが止まらないようにするためです。
+
+槌の速さは Rigidbody の中心だけを見ると足りません。2 つの支点が回ることで、先端は中心より速く動くことがあります。そのため、鐘に当たった場所での槌の速度を使います。鐘も動いている時は、鐘の同じ場所の速度を引いて、相対速度を計算します。
+
+鐘の判定には Trigger を使っています。槌が鐘を通った時に命中を記録します。普通の物理衝突にすると槌が跳ね返ったり遅くなったりするので、振り子の勢いが続くように Trigger にしました。
+
+## 煩悩の数の計算
+
+命中した時の相対速度と、槌がついている 2 本目の棒全体の質量を使って、減る煩悩の数を計算します。鐘の重さはこの計算に使っていません。
+
+```text
+相対速度 = |槌が当たった場所の速度 - 鐘が当たった場所の速度|
+減る煩悩 = (相対速度 / 基準速度) ^ 2
+         × (2 本目の棒と槌の質量 / 基準質量)
+         × 0.3
+```
+
+速度を二乗しているので、速く当たるほど減る数が大きくなります。計算結果を四捨五入して、1 回の命中で最低 1、最大 18 にしています。基準速度や質量、重力、減衰などは Inspector で調整できるようにしました。
+

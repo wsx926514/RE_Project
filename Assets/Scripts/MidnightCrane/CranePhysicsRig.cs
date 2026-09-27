@@ -2,86 +2,103 @@ using UnityEngine;
 
 namespace MidnightCrane
 {
-    /// <summary>
-    /// 設定雙節吊臂擺錘，設定完成後將所有運動交給 Unity Physics 2D。
-    /// 此元件不會建立物件、畫面、輸入或 UI。
-    ///
-    /// 兩段連桿皆以本地座標 +X，表示從鉸鏈指向自由端的方向。
-    /// 選用的質量碰撞器應放在子物件上，而且子物件不可擁有 Rigidbody2D。
-    /// </summary>
+    // 吊り腕と二重振り子の本体。
     [DisallowMultipleComponent]
     public sealed class CranePhysicsRig : MonoBehaviour
     {
-        // 避免長度或寬度為 0，造成碰撞器與關節計算失效。
-        private const float MinimumDimension = 0.01f;
+        private const float MinLength = 0.01f;
 
-        [Header("必要的場景參照")]
-        // 根部錨點不受重力影響；第一段連桿會接在這個剛體上。
+        private enum RigMode
+        {
+            Setup,
+            Running,
+            Paused,
+            Stopped
+        }
+
+        [Header("物理物体")]
         [SerializeField] private Rigidbody2D rootAnchor;
-        // 兩段會實際參與模擬的動態剛體。
         [SerializeField] private Rigidbody2D firstLink;
         [SerializeField] private Rigidbody2D secondLink;
-        // 每個 HingeJoint2D 必須掛在對應的連桿剛體上。
         [SerializeField] private HingeJoint2D firstJoint;
         [SerializeField] private HingeJoint2D secondJoint;
-        // 連桿本體的碰撞範圍，同時用於依密度計算質量。
         [SerializeField] private BoxCollider2D firstLinkCollider;
         [SerializeField] private BoxCollider2D secondLinkCollider;
 
-        [Header("選用的場景參照")]
-        [Tooltip("指定後，根部錨點會放在距離此 Transform 為 boomLength 的位置。")]
+        [Header("表示")]
+        [SerializeField] private SpriteRenderer boomRenderer;
+        [SerializeField] private SpriteRenderer firstLinkRenderer;
+        [SerializeField] private SpriteRenderer secondLinkRenderer;
+        [SerializeField, Min(MinLength)] private float boomWidth = 0.62f;
+
+        [Header("任意の物体")]
         [SerializeField] private Transform boomPivot;
-        [Tooltip("第一段連桿自由端的子物件碰撞器。")]
         [SerializeField] private Collider2D firstJointMassCollider;
-        [Tooltip("第二段連桿自由端的子物件碰撞器。")]
         [SerializeField] private Collider2D endMassCollider;
 
-        [Header("初始幾何設定")]
-        // 吊臂角度以世界座標的 +X 軸為 0 度，逆時針為正方向。
-        [SerializeField, Min(MinimumDimension)] private float boomLength = 4.15f;
+        [Header("初期位置と長さ")]
+        [SerializeField, Min(MinLength)] private float boomLength = 4.15f;
         [SerializeField] private float minimumBoomAngle = 20f;
         [SerializeField] private float maximumBoomAngle = 80f;
         [SerializeField] private float boomAngle = 57f;
-        [SerializeField, Min(MinimumDimension)] private float firstLinkLength = 2.75f;
-        [SerializeField, Min(MinimumDimension)] private float secondLinkLength = 2.9f;
-        // 這兩個角度只決定釋放前的初始姿勢，不會在模擬中持續限制角度。
+        [SerializeField, Min(0.1f)] private float boomAngleStep = 5f;
+        [SerializeField, Min(MinLength)] private float firstLinkLength = 2.75f;
+        [SerializeField, Min(MinLength)] private float secondLinkLength = 2.9f;
         [SerializeField] private float firstLinkWorldAngle = -13f;
         [SerializeField] private float secondLinkWorldAngle = 47f;
-        [SerializeField, Min(MinimumDimension)] private float firstLinkWidth = 0.25f;
-        [SerializeField, Min(MinimumDimension)] private float secondLinkWidth = 0.22f;
+        [SerializeField, Min(MinLength)] private float firstLinkWidth = 0.25f;
+        [SerializeField, Min(MinLength)] private float secondLinkWidth = 0.22f;
 
-        [Header("依碰撞器密度計算質量")]
-        // Rigidbody2D.useAutoMass 開啟後，Unity 會依所有所屬碰撞器的
-        // 面積與 density 自動計算剛體質量及質心。
+        [Header("質量")]
         [SerializeField, Min(0f)] private float firstLinkDensity = 0.22f;
         [SerializeField, Min(0f)] private float secondLinkDensity = 0.16f;
         [SerializeField, Min(0f)] private float firstJointMassDensity = 8.5f;
-        [SerializeField, Min(0f)] private float endMassDensity = 11.5f;
+        [SerializeField, Min(0f)] private float endMassDensity = 14f;
 
-        [Header("物理材質（選用）")]
-        [SerializeField] private PhysicsMaterial2D linkMaterial;
-        [SerializeField] private PhysicsMaterial2D massMaterial;
-
-        [Header("剛體模擬設定")]
-        [SerializeField] private bool startSimulatingOnAwake = true;
-        [SerializeField] private float gravityScale = 1f;
+        [Header("物理設定")]
+        [SerializeField] private bool startSimulatingOnAwake;
+        [SerializeField] private float gravityScale = 1.65f;
         [SerializeField, Min(0f)] private float linearDamping = 0.005f;
         [SerializeField, Min(0f)] private float angularDamping = 0.012f;
         [SerializeField] private CollisionDetectionMode2D collisionDetection =
             CollisionDetectionMode2D.Continuous;
         [SerializeField] private RigidbodyInterpolation2D interpolation =
-            RigidbodyInterpolation2D.Interpolate;
+            RigidbodyInterpolation2D.None;
+        [SerializeField] private PhysicsMaterial2D linkMaterial;
+        [SerializeField] private PhysicsMaterial2D massMaterial;
 
-        private bool configurationApplied;
+        private RigMode mode = RigMode.Setup;
+        private Vector2 rootPoint;
+        private Vector2 firstJointPoint;
+        private Vector2 endPoint;
+        private Vector2 pausedFirstVelocity;
+        private Vector2 pausedSecondVelocity;
+        private float pausedFirstAngularVelocity;
+        private float pausedSecondAngularVelocity;
 
         public float BoomAngle => boomAngle;
         public float FirstLinkLength => firstLinkLength;
         public float SecondLinkLength => secondLinkLength;
-        public bool IsSimulating { get; private set; }
+        public float MinimumBoomAngle => minimumBoomAngle;
+        public float MaximumBoomAngle => maximumBoomAngle;
+        public float FirstLinkMass => firstLink != null ? firstLink.mass : 0f;
+        public float SecondLinkMass => secondLink != null ? secondLink.mass : 0f;
+        public Rigidbody2D EndMassBody => secondLink;
+        public Collider2D EndMassCollider => endMassCollider;
+        public bool CanEditSetup => mode == RigMode.Setup;
+        public bool IsSimulating => mode == RigMode.Running;
+        public bool IsPaused => mode == RigMode.Paused;
+
+        // 槌の先端速度。回転ぶんもここに入る。
+        public Vector2 GetEndMassVelocityAt(Vector2 worldPoint)
+        {
+            return secondLink != null
+                ? secondLink.GetPointVelocity(worldPoint)
+                : Vector2.zero;
+        }
 
         private void Awake()
         {
-            // 缺少必要元件時停用腳本，避免模擬開始後連續產生 NullReference。
             if (!ValidateRequiredReferences(true))
             {
                 enabled = false;
@@ -89,152 +106,381 @@ namespace MidnightCrane
             }
 
             ApplyConfiguration();
-            // 關閉此選項時，外部 UI 或其他腳本可自行決定釋放時機。
             if (startSimulatingOnAwake)
             {
                 StartSimulation();
             }
         }
 
-        /// <summary>
-        /// 設定所有可調整的幾何參數。連桿長度沒有上限。
-        /// 在模擬中呼叫時，物理結構會先回到設定姿勢。
-        /// </summary>
-        public void SetConfiguration(
-            float newBoomAngle,
-            float newFirstLinkLength,
-            float newSecondLinkLength,
-            float newFirstLinkWorldAngle,
-            float newSecondLinkWorldAngle)
-        {
-            boomAngle = Mathf.Clamp(newBoomAngle, minimumBoomAngle, maximumBoomAngle);
-            firstLinkLength = Mathf.Max(MinimumDimension, newFirstLinkLength);
-            secondLinkLength = Mathf.Max(MinimumDimension, newSecondLinkLength);
-            firstLinkWorldAngle = newFirstLinkWorldAngle;
-            secondLinkWorldAngle = newSecondLinkWorldAngle;
-            ApplyConfiguration();
-        }
-
-        public void SetBoomAngle(float angle)
-        {
-            // 第一支固定吊臂只允許在指定角度範圍內移動。
-            boomAngle = Mathf.Clamp(angle, minimumBoomAngle, maximumBoomAngle);
-            ApplyConfiguration();
-        }
-
-        /// <summary>
-        /// 設定兩段連桿長度。只有防止零尺寸的下限，沒有最大長度限制。
-        /// </summary>
-        public void SetLinkLengths(float firstLength, float secondLength)
-        {
-            firstLinkLength = Mathf.Max(MinimumDimension, firstLength);
-            secondLinkLength = Mathf.Max(MinimumDimension, secondLength);
-            ApplyConfiguration();
-        }
-
-        /// <summary>
-        /// 改變末端質量碰撞器的密度，並立即要求 Unity 重新計算質量。
-        /// </summary>
-        public void SetEndMassDensity(float density)
-        {
-            endMassDensity = Mathf.Max(0f, density);
-            if (endMassCollider != null)
-            {
-                endMassCollider.density = endMassDensity;
-                RefreshAutomaticMass(secondLink);
-            }
-        }
-
-        /// <summary>
-        /// 套用尺寸、質量、關節錨點與指定的初始姿勢。
-        /// 呼叫 StartSimulation 前，兩段剛體會維持 Kinematic。
-        /// </summary>
-        [ContextMenu("套用物理設定")]
+        // Inspector の値から待機姿勢を作り直す。
+        [ContextMenu("初期姿勢を適用")]
         public void ApplyConfiguration()
         {
-            ClampConfiguration();
             if (!ValidateRequiredReferences(Application.isPlaying))
             {
-                configurationApplied = false;
                 return;
             }
 
-            // 先停止剛體再改變長度與位置，避免保留上一輪模擬的速度。
-            StopBody(firstLink);
-            StopBody(secondLink);
-
-            // 設定順序：固定點 → 剛體參數 → 碰撞器 → 關節 → 初始姿勢。
-            ConfigureRootAnchor();
-            ConfigureBodies();
-            ConfigureColliders();
-            ConfigureJoints();
-            ApplyInitialPose();
-            RefreshAutomaticMass(firstLink);
-            RefreshAutomaticMass(secondLink);
-
-            configurationApplied = true;
-            IsSimulating = false;
+            ClampSettings();
+            mode = RigMode.Setup;
+            ConfigureRootPoint();
+            UpdatePointsFromSettings();
+            ConfigurePhysicsParts();
+            PlaceBodies();
         }
 
-        /// <summary>
-        /// 釋放兩段連桿。從此刻起，其運動與碰撞反應完全由
-        /// Unity Physics 2D 控制。
-        /// </summary>
-        [ContextMenu("開始物理模擬")]
+        // 待機を外して物理に渡す。
+        [ContextMenu("物理を開始")]
         public void StartSimulation()
         {
-            if (!configurationApplied)
-            {
-                ApplyConfiguration();
-            }
-
-            if (!configurationApplied)
+            if (mode != RigMode.Setup)
             {
                 return;
             }
 
             firstLink.bodyType = RigidbodyType2D.Dynamic;
             secondLink.bodyType = RigidbodyType2D.Dynamic;
+            Physics2D.SyncTransforms();
             firstLink.WakeUp();
             secondLink.WakeUp();
-            IsSimulating = true;
+            mode = RigMode.Running;
         }
 
-        /// <summary>
-        /// 停止兩段剛體，並恢復指定的幾何設定與初始姿勢。
-        /// </summary>
-        [ContextMenu("重置物理模擬")]
+        // 速度を取ってから固める。
+        [ContextMenu("物理を一時停止")]
+        public void PauseSimulation()
+        {
+            if (mode != RigMode.Running)
+            {
+                return;
+            }
+
+            pausedFirstVelocity = firstLink.linearVelocity;
+            pausedSecondVelocity = secondLink.linearVelocity;
+            pausedFirstAngularVelocity = firstLink.angularVelocity;
+            pausedSecondAngularVelocity = secondLink.angularVelocity;
+
+            FreezeBody(firstLink);
+            FreezeBody(secondLink);
+            mode = RigMode.Paused;
+        }
+
+        // 止める前の勢いを戻す。
+        [ContextMenu("物理を再開")]
+        public void ResumeSimulation()
+        {
+            if (mode != RigMode.Paused)
+            {
+                return;
+            }
+
+            firstLink.bodyType = RigidbodyType2D.Dynamic;
+            secondLink.bodyType = RigidbodyType2D.Dynamic;
+            firstLink.linearVelocity = pausedFirstVelocity;
+            secondLink.linearVelocity = pausedSecondVelocity;
+            firstLink.angularVelocity = pausedFirstAngularVelocity;
+            secondLink.angularVelocity = pausedSecondAngularVelocity;
+            firstLink.WakeUp();
+            secondLink.WakeUp();
+            mode = RigMode.Running;
+        }
+
+        // END ならその場で止める。
+        [ContextMenu("物理を停止")]
+        public void StopSimulation()
+        {
+            if (mode == RigMode.Running || mode == RigMode.Paused)
+            {
+                FreezeBody(firstLink);
+                FreezeBody(secondLink);
+                mode = RigMode.Stopped;
+            }
+        }
+
+        // いつもの待機姿勢へ。
+        [ContextMenu("初期姿勢に戻す")]
         public void ResetSimulation()
         {
             ApplyConfiguration();
         }
 
-        private void ConfigureRootAnchor()
+        // 矢印から来る角度変更。
+        public void SetBoomAngle(float angle)
         {
-            // 根部只提供關節固定點，不參與重力與碰撞動力反應。
+            if (!CanEditSetup)
+            {
+                return;
+            }
+
+            float newAngle = Mathf.Clamp(angle, minimumBoomAngle, maximumBoomAngle);
+            if (Mathf.Approximately(newAngle, boomAngle))
+            {
+                return;
+            }
+
+            float angleDifference = newAngle - boomAngle;
+
+            // 前の二本と槌も同じ角度だけ連れていく。
+            boomAngle = newAngle;
+            firstLinkWorldAngle += angleDifference;
+            secondLinkWorldAngle += angleDifference;
+            ApplyConfiguration();
+        }
+
+        // 一回だけ上げたい時用。
+        public void IncreaseBoomAngle()
+        {
+            SetBoomAngle(boomAngle + boomAngleStep);
+        }
+
+        // 一回だけ下げたい時用。
+        public void DecreaseBoomAngle()
+        {
+            SetBoomAngle(boomAngle - boomAngleStep);
+        }
+
+        // 二本の長さだけ更新。
+        public void SetLinkLengths(float firstLength, float secondLength)
+        {
+            if (!CanEditSetup)
+            {
+                return;
+            }
+
+            firstLinkLength = Mathf.Max(MinLength, firstLength);
+            secondLinkLength = Mathf.Max(MinLength, secondLength);
+            ApplyConfiguration();
+        }
+
+        // 待機中の向きだけ更新。
+        public void SetInitialLinkAngles(float firstAngle, float secondAngle)
+        {
+            if (!CanEditSetup)
+            {
+                return;
+            }
+
+            firstLinkWorldAngle = firstAngle;
+            secondLinkWorldAngle = secondAngle;
+            ApplyConfiguration();
+        }
+
+        // 姿勢をまとめて差し替える時用。
+        public void SetConfiguration(
+            float newBoomAngle,
+            float newFirstLength,
+            float newSecondLength,
+            float newFirstWorldAngle,
+            float newSecondWorldAngle)
+        {
+            if (!CanEditSetup)
+            {
+                return;
+            }
+
+            boomAngle = Mathf.Clamp(newBoomAngle, minimumBoomAngle, maximumBoomAngle);
+            firstLinkLength = Mathf.Max(MinLength, newFirstLength);
+            secondLinkLength = Mathf.Max(MinLength, newSecondLength);
+            firstLinkWorldAngle = newFirstWorldAngle;
+            secondLinkWorldAngle = newSecondWorldAngle;
+            ApplyConfiguration();
+        }
+
+        // 槌の重さ調整。
+        public void SetEndMassDensity(float density)
+        {
+            if (!CanEditSetup)
+            {
+                return;
+            }
+
+            endMassDensity = Mathf.Max(0f, density);
+            if (endMassCollider != null && secondLink != null)
+            {
+                PrepareBodyForMassUpdate(secondLink);
+                endMassCollider.density = endMassDensity;
+                RefreshMass(secondLink);
+                FreezeBody(secondLink);
+            }
+        }
+
+        // 調整ハンドルが追いかける座標。
+        public Vector2 GetSetupPoint(CraneSetupPoint point)
+        {
+            switch (point)
+            {
+                case CraneSetupPoint.BoomEnd:
+                    return rootPoint;
+                case CraneSetupPoint.FirstJoint:
+                    return firstJointPoint;
+                default:
+                    return endPoint;
+            }
+        }
+
+        // ドラッグ中の姿勢更新。
+        public bool MoveSetupPoint(CraneSetupPoint point, Vector2 newPosition)
+        {
+            if (!CanEditSetup)
+            {
+                return false;
+            }
+
+            if (point == CraneSetupPoint.BoomEnd)
+            {
+                if (boomPivot == null)
+                {
+                    return false;
+                }
+
+                Vector2 direction = newPosition - (Vector2)boomPivot.position;
+                if (direction.sqrMagnitude < MinLength * MinLength)
+                {
+                    return false;
+                }
+
+                float newAngle = Mathf.Clamp(
+                    VectorAngle(direction),
+                    minimumBoomAngle,
+                    maximumBoomAngle);
+                float angleDifference = newAngle - boomAngle;
+
+                // 矢印と同じように、前側はまとめて回す。
+                boomAngle = newAngle;
+                firstLinkWorldAngle += angleDifference;
+                secondLinkWorldAngle += angleDifference;
+                rootPoint = (Vector2)boomPivot.position +
+                    DirectionFromAngle(boomAngle) * boomLength;
+                UpdatePointsFromSettings();
+            }
+            else if (point == CraneSetupPoint.FirstJoint)
+            {
+                Vector2 direction = newPosition - rootPoint;
+                if (direction.sqrMagnitude < MinLength * MinLength)
+                {
+                    direction = DirectionFromAngle(firstLinkWorldAngle);
+                }
+
+                firstJointPoint = rootPoint + direction.normalized *
+                    Mathf.Max(MinLength, direction.magnitude);
+            }
+            else
+            {
+                Vector2 direction = newPosition - firstJointPoint;
+                if (direction.sqrMagnitude < MinLength * MinLength)
+                {
+                    direction = DirectionFromAngle(secondLinkWorldAngle);
+                }
+
+                endPoint = firstJointPoint + direction.normalized *
+                    Mathf.Max(MinLength, direction.magnitude);
+            }
+
+            ReadSettingsFromPoints();
+            ConfigurePhysicsParts();
+            PlaceBodies();
+            return true;
+        }
+
+        // Scene で置いた形を初期値として拾う。
+        [ContextMenu("現在の配置を初期姿勢にする")]
+        public void CaptureCurrentScenePose()
+        {
+            if (!ValidateRequiredReferences(true))
+            {
+                return;
+            }
+
+            rootPoint = rootAnchor.position;
+            Vector2 toFirstCenter = firstLink.position - rootPoint;
+            Vector2 firstEnd = rootPoint + toFirstCenter * 2f;
+            Vector2 toSecondCenter = secondLink.position - firstEnd;
+
+            if (toFirstCenter.sqrMagnitude < MinLength * MinLength ||
+                toSecondCenter.sqrMagnitude < MinLength * MinLength)
+            {
+                Debug.LogError("三つの支点を離して配置してください。", this);
+                return;
+            }
+
+            firstJointPoint = firstEnd;
+            endPoint = firstEnd + toSecondCenter * 2f;
+            ReadSettingsFromPoints();
+
+            if (boomPivot != null)
+            {
+                Vector2 boomDirection = rootPoint - (Vector2)boomPivot.position;
+                boomLength = boomDirection.magnitude;
+                boomAngle = Mathf.Clamp(
+                    VectorAngle(boomDirection),
+                    minimumBoomAngle,
+                    maximumBoomAngle);
+            }
+
+            ApplyConfiguration();
+        }
+
+        // 参照切れを見るための自分用チェック。
+        [ContextMenu("物理設定を確認")]
+        public void CheckConfiguration()
+        {
+            if (ValidateRequiredReferences(true))
+            {
+                Debug.Log("物理設定に必要な参照があります。", this);
+            }
+        }
+
+        private void ConfigureRootPoint()
+        {
             rootAnchor.bodyType = RigidbodyType2D.Kinematic;
             rootAnchor.gravityScale = 0f;
             rootAnchor.linearVelocity = Vector2.zero;
             rootAnchor.angularVelocity = 0f;
+            rootAnchor.interpolation = interpolation;
 
             if (boomPivot != null)
             {
-                // 由吊臂基點、長度與角度計算第一個鉸鏈的世界座標。
                 rootAnchor.position = (Vector2)boomPivot.position +
                     DirectionFromAngle(boomAngle) * boomLength;
             }
+
+            rootPoint = rootAnchor.position;
         }
 
-        private void ConfigureBodies()
+        private void UpdatePointsFromSettings()
+        {
+            firstJointPoint = rootPoint +
+                DirectionFromAngle(firstLinkWorldAngle) * firstLinkLength;
+            endPoint = firstJointPoint +
+                DirectionFromAngle(secondLinkWorldAngle) * secondLinkLength;
+        }
+
+        private void ReadSettingsFromPoints()
+        {
+            Vector2 firstVector = firstJointPoint - rootPoint;
+            Vector2 secondVector = endPoint - firstJointPoint;
+
+            firstLinkLength = Mathf.Max(MinLength, firstVector.magnitude);
+            secondLinkLength = Mathf.Max(MinLength, secondVector.magnitude);
+            firstLinkWorldAngle = VectorAngle(firstVector);
+            secondLinkWorldAngle = VectorAngle(secondVector);
+        }
+
+        private void ConfigurePhysicsParts()
         {
             ConfigureBody(firstLink);
             ConfigureBody(secondLink);
+            ConfigureColliders();
+            ConfigureJoints();
+            RefreshMass(firstLink);
+            RefreshMass(secondLink);
+            FreezeBody(firstLink);
+            FreezeBody(secondLink);
         }
 
         private void ConfigureBody(Rigidbody2D body)
         {
-            // 質量由碰撞器尺寸及密度決定，不在程式內寫死 mass。
-            body.useAutoMass = true;
+            PrepareBodyForMassUpdate(body);
             body.gravityScale = gravityScale;
             body.linearDamping = linearDamping;
             body.angularDamping = angularDamping;
@@ -242,16 +488,34 @@ namespace MidnightCrane
             body.interpolation = interpolation;
         }
 
+        // Auto Mass を計算し直す前の下準備。
+        private static void PrepareBodyForMassUpdate(Rigidbody2D body)
+        {
+            body.bodyType = RigidbodyType2D.Dynamic;
+            body.linearVelocity = Vector2.zero;
+            body.angularVelocity = 0f;
+            body.useAutoMass = true;
+        }
+
         private void ConfigureColliders()
         {
-            // 連桿剛體位於兩端點的中間，因此碰撞器以原點為中心。
             firstLinkCollider.size = new Vector2(firstLinkLength, firstLinkWidth);
             firstLinkCollider.offset = Vector2.zero;
             firstLinkCollider.density = firstLinkDensity;
+            SetLinkRendererSize(
+                ref firstLinkRenderer,
+                firstLink,
+                firstLinkLength,
+                firstLinkWidth);
 
             secondLinkCollider.size = new Vector2(secondLinkLength, secondLinkWidth);
             secondLinkCollider.offset = Vector2.zero;
             secondLinkCollider.density = secondLinkDensity;
+            SetLinkRendererSize(
+                ref secondLinkRenderer,
+                secondLink,
+                secondLinkLength,
+                secondLinkWidth);
 
             if (linkMaterial != null)
             {
@@ -259,19 +523,37 @@ namespace MidnightCrane
                 secondLinkCollider.sharedMaterial = linkMaterial;
             }
 
-            ConfigureMassCollider(
+            SetMassCollider(
                 firstJointMassCollider,
                 firstLink,
                 firstLinkLength * 0.5f,
                 firstJointMassDensity);
-            ConfigureMassCollider(
+            SetMassCollider(
                 endMassCollider,
                 secondLink,
                 secondLinkLength * 0.5f,
                 endMassDensity);
+
+            // 当たるのは槌だけ。棒はすり抜けさせる。
+            SetCollisionEnabled(firstLinkCollider, false);
+            SetCollisionEnabled(secondLinkCollider, false);
+            SetCollisionEnabled(firstJointMassCollider, false);
+            SetCollisionEnabled(endMassCollider, true);
         }
 
-        private void ConfigureMassCollider(
+        private static void SetCollisionEnabled(Collider2D target, bool value)
+        {
+            if (target == null)
+            {
+                return;
+            }
+
+            target.isTrigger = false;
+            target.includeLayers = 0;
+            target.excludeLayers = value ? 0 : Physics2D.AllLayers;
+        }
+
+        private void SetMassCollider(
             Collider2D massCollider,
             Rigidbody2D owner,
             float localX,
@@ -284,22 +566,16 @@ namespace MidnightCrane
 
             if (massCollider.attachedRigidbody != owner)
             {
-                Debug.LogWarning(
-                    massCollider.name +
-                    " 必須屬於 " + owner.name +
-                    "，而且不可擁有獨立的 Rigidbody2D。",
-                    massCollider);
+                Debug.LogWarning(massCollider.name + " を正しい連桿の子にしてください。", massCollider);
                 return;
             }
 
             if (massCollider.transform == owner.transform)
             {
-                // 碰撞器與剛體在同一物件時，用 offset 放到連桿末端。
                 massCollider.offset = new Vector2(localX, 0f);
             }
             else
             {
-                // 子物件碰撞器會自動成為父剛體的複合碰撞器。
                 massCollider.transform.localPosition = new Vector3(localX, 0f, 0f);
                 massCollider.transform.localRotation = Quaternion.identity;
                 massCollider.offset = Vector2.zero;
@@ -312,16 +588,34 @@ namespace MidnightCrane
             }
         }
 
+        private static void SetLinkRendererSize(
+            ref SpriteRenderer linkRenderer,
+            Rigidbody2D linkBody,
+            float length,
+            float width)
+        {
+            if (linkRenderer == null)
+            {
+                linkRenderer = linkBody.GetComponent<SpriteRenderer>();
+            }
+
+            if (linkRenderer == null)
+            {
+                return;
+            }
+
+            linkRenderer.drawMode = SpriteDrawMode.Sliced;
+            linkRenderer.size = new Vector2(length, width);
+        }
+
         private void ConfigureJoints()
         {
-            // 第一段左端接固定錨點。
             firstJoint.connectedBody = rootAnchor;
             firstJoint.autoConfigureConnectedAnchor = false;
             firstJoint.anchor = new Vector2(-firstLinkLength * 0.5f, 0f);
             firstJoint.connectedAnchor = Vector2.zero;
             firstJoint.enableCollision = false;
 
-            // 第二段左端接第一段右端，形成雙擺結構。
             secondJoint.connectedBody = firstLink;
             secondJoint.autoConfigureConnectedAnchor = false;
             secondJoint.anchor = new Vector2(-secondLinkLength * 0.5f, 0f);
@@ -329,51 +623,64 @@ namespace MidnightCrane
             secondJoint.enableCollision = false;
         }
 
-        private void ApplyInitialPose()
+        private void PlaceBodies()
         {
-            // 依「起點 + 方向向量 × 長度」依序求出三個支點。
-            Vector2 rootPoint = rootAnchor.position;
-            Vector2 firstEnd = rootPoint +
-                DirectionFromAngle(firstLinkWorldAngle) * firstLinkLength;
-            Vector2 secondEnd = firstEnd +
-                DirectionFromAngle(secondLinkWorldAngle) * secondLinkLength;
-
-            SetBodyBetween(firstLink, rootPoint, firstEnd);
-            SetBodyBetween(secondLink, firstEnd, secondEnd);
+            rootAnchor.position = rootPoint;
+            SetBodyBetween(firstLink, rootPoint, firstJointPoint);
+            SetBodyBetween(secondLink, firstJointPoint, endPoint);
+            UpdateBoomRenderer();
             Physics2D.SyncTransforms();
         }
 
-        private static void StopBody(Rigidbody2D body)
+        // 固定吊り腕を二点の間に置き直す。
+        private void UpdateBoomRenderer()
         {
-            body.bodyType = RigidbodyType2D.Kinematic;
-            body.linearVelocity = Vector2.zero;
-            body.angularVelocity = 0f;
+            if (boomRenderer == null || boomPivot == null)
+            {
+                return;
+            }
+
+            Vector2 start = boomPivot.position;
+            Vector2 end = rootPoint;
+            Vector2 direction = end - start;
+            Transform visual = boomRenderer.transform;
+            Vector3 oldPosition = visual.position;
+
+            visual.position = new Vector3(
+                (start.x + end.x) * 0.5f,
+                (start.y + end.y) * 0.5f,
+                oldPosition.z);
+            visual.rotation = Quaternion.Euler(0f, 0f, VectorAngle(direction));
+            boomRenderer.drawMode = SpriteDrawMode.Sliced;
+            boomRenderer.size = new Vector2(direction.magnitude, boomWidth);
         }
 
-        private static void RefreshAutomaticMass(Rigidbody2D body)
+        private void ClampSettings()
         {
-            // 重新切換 Auto Mass，要求 Unity 立即依最新 Collider 重算質量。
-            body.useAutoMass = false;
-            body.useAutoMass = true;
-        }
+            boomLength = Mathf.Max(MinLength, boomLength);
+            firstLinkLength = Mathf.Max(MinLength, firstLinkLength);
+            secondLinkLength = Mathf.Max(MinLength, secondLinkLength);
+            boomAngleStep = Mathf.Max(0.1f, boomAngleStep);
+            boomWidth = Mathf.Max(MinLength, boomWidth);
+            firstLinkWidth = Mathf.Max(MinLength, firstLinkWidth);
+            secondLinkWidth = Mathf.Max(MinLength, secondLinkWidth);
 
-        private static void SetBodyBetween(Rigidbody2D body, Vector2 start, Vector2 end)
-        {
-            // 連桿中心位於兩端點中間，旋轉角度則由兩點差向量取得。
-            Vector2 delta = end - start;
-            body.position = (start + end) * 0.5f;
-            body.rotation = Mathf.Atan2(delta.y, delta.x) * Mathf.Rad2Deg;
-        }
+            if (maximumBoomAngle < minimumBoomAngle)
+            {
+                maximumBoomAngle = minimumBoomAngle;
+            }
 
-        private static Vector2 DirectionFromAngle(float angle)
-        {
-            float radians = angle * Mathf.Deg2Rad;
-            return new Vector2(Mathf.Cos(radians), Mathf.Sin(radians));
+            boomAngle = Mathf.Clamp(boomAngle, minimumBoomAngle, maximumBoomAngle);
+            firstLinkDensity = Mathf.Max(0f, firstLinkDensity);
+            secondLinkDensity = Mathf.Max(0f, secondLinkDensity);
+            firstJointMassDensity = Mathf.Max(0f, firstJointMassDensity);
+            endMassDensity = Mathf.Max(0f, endMassDensity);
+            linearDamping = Mathf.Max(0f, linearDamping);
+            angularDamping = Mathf.Max(0f, angularDamping);
         }
 
         private bool ValidateRequiredReferences(bool logError)
         {
-            // 除了檢查空參照，也確認 Joint 與 Collider 確實屬於指定剛體。
             bool valid = rootAnchor != null &&
                 firstLink != null &&
                 secondLink != null &&
@@ -390,40 +697,47 @@ namespace MidnightCrane
             if (!valid && logError)
             {
                 Debug.LogError(
-                    "CranePhysicsRig 的參照缺失，或元件掛在錯誤的剛體上。" +
-                    "請在 Inspector 指定根部錨點、兩段連桿剛體、各自的 HingeJoint2D，" +
-                    "以及各自的 BoxCollider2D。",
+                    "Rigidbody2D、HingeJoint2D、BoxCollider2D の参照を確認してください。",
                     this);
             }
 
             return valid;
         }
 
-        private void ClampConfiguration()
+        private static void FreezeBody(Rigidbody2D body)
         {
-            boomLength = Mathf.Max(MinimumDimension, boomLength);
-            firstLinkLength = Mathf.Max(MinimumDimension, firstLinkLength);
-            secondLinkLength = Mathf.Max(MinimumDimension, secondLinkLength);
-            firstLinkWidth = Mathf.Max(MinimumDimension, firstLinkWidth);
-            secondLinkWidth = Mathf.Max(MinimumDimension, secondLinkWidth);
+            body.bodyType = RigidbodyType2D.Kinematic;
+            body.linearVelocity = Vector2.zero;
+            body.angularVelocity = 0f;
+        }
 
-            if (maximumBoomAngle < minimumBoomAngle)
-            {
-                maximumBoomAngle = minimumBoomAngle;
-            }
+        private static void RefreshMass(Rigidbody2D body)
+        {
+            body.useAutoMass = false;
+            body.useAutoMass = true;
+        }
 
-            boomAngle = Mathf.Clamp(boomAngle, minimumBoomAngle, maximumBoomAngle);
-            firstLinkDensity = Mathf.Max(0f, firstLinkDensity);
-            secondLinkDensity = Mathf.Max(0f, secondLinkDensity);
-            firstJointMassDensity = Mathf.Max(0f, firstJointMassDensity);
-            endMassDensity = Mathf.Max(0f, endMassDensity);
-            linearDamping = Mathf.Max(0f, linearDamping);
-            angularDamping = Mathf.Max(0f, angularDamping);
+        private static void SetBodyBetween(Rigidbody2D body, Vector2 start, Vector2 end)
+        {
+            Vector2 direction = end - start;
+            body.position = (start + end) * 0.5f;
+            body.rotation = VectorAngle(direction);
+        }
+
+        private static Vector2 DirectionFromAngle(float angle)
+        {
+            float radians = angle * Mathf.Deg2Rad;
+            return new Vector2(Mathf.Cos(radians), Mathf.Sin(radians));
+        }
+
+        private static float VectorAngle(Vector2 direction)
+        {
+            return Mathf.Atan2(direction.y, direction.x) * Mathf.Rad2Deg;
         }
 
         private void OnValidate()
         {
-            ClampConfiguration();
+            ClampSettings();
         }
     }
 }

@@ -28,6 +28,15 @@
 # Visual Studio cache directory
 .vs/
 
+# Rider / Fleet user settings
+.idea/
+.fleet/
+*.DotSettings.user
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
 # Gradle cache directory
 .gradle/
 
@@ -73,3 +82,7 @@ crashlytics-build.properties
 # Temporary auto-generated Android Assets
 /[Aa]ssets/[Ss]treamingAssets/aa.meta
 /[Aa]ssets/[Ss]treamingAssets/aa/*
+
+# The font and its license are already extracted in Assets.
+/Assets/x12y12pxMaruMinya_2023-07-14.zip
+/Assets/x12y12pxMaruMinya_2023-07-14.zip.meta
